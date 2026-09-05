@@ -46,7 +46,39 @@ function update_script() {
     exit
 }
 
+# Debian 12 above is a requirement, not a default: Frigate is built on
+# debian:12 with python3.11 pinned upstream, and frigate-install.sh refuses
+# anything else. What can still be stale is the *template*. The engine lists
+# templates already in local storage and, if it finds one, uses it and skips
+# the catalog refresh entirely (pve/backend.func, "Step 2") - so a host that
+# cached debian-12-standard_12.7-1 long ago keeps building from it forever.
+# Pull the newest 12.x point release into whichever storage already holds
+# Debian 12 templates; the engine sorts by version and takes the last, so the
+# fresh one wins. Storages with no Debian 12 template are left alone: with an
+# empty cache the engine already goes online for the newest by itself.
+function refresh_os_template() {
+    command -v pveam >/dev/null || return 0
+    pveam update >/dev/null 2>&1 || return 0
+
+    local newest
+    newest=$(pveam available -section system 2>/dev/null | awk '{print $2}' |
+        grep -E '^debian-12-standard_.*_amd64\.tar\.(zst|xz|gz)$' |
+        sort -t_ -k2 -V | tail -n1)
+    [[ -n "$newest" ]] || return 0
+
+    local store
+    while read -r store; do
+        [[ -n "$store" ]] || continue
+        pveam list "$store" 2>/dev/null | grep -q "debian-12-standard" || continue
+        pveam list "$store" 2>/dev/null | grep -q "$newest" && continue
+        echo -e "${INFO}${YW}Fetching newer Debian 12 template: ${newest}${CL}"
+        pveam download "$store" "$newest" >/dev/null 2>&1 ||
+            echo -e "${INFO}${YW}Download failed, keeping the cached template${CL}"
+    done < <(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1}')
+}
+
 start
+refresh_os_template
 build_container
 description
 
