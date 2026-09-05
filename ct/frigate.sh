@@ -16,7 +16,18 @@ var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
 var_arm64="${var_arm64:-no}"
 var_unprivileged="${var_unprivileged:-0}"
+# var_gpu=yes makes core/backend.func auto-detect the host's GPU(s) via lspci
+# and pass the device nodes into the LXC with the right video/render GIDs -
+# for AMD that includes /dev/kfd, which ROCm needs. frigate-install.sh then
+# installs the matching userspace: Mesa VA-API for AMD, plus the ROCm and
+# MIGraphX stack that the stock script leaves out on APUs.
 var_gpu="${var_gpu:-yes}"
+# Optional: pin a specific Frigate tag (stable or RC, e.g. "v0.17.2" or
+# "v0.18.0-rc1") instead of being asked interactively during install. Only
+# takes effect if it reaches the container's environment (e.g. you export it
+# in a wrapper you control) - see frigate-install.sh for the actual selection
+# logic and its interactive prompt.
+FRIGATE_VERSION="${FRIGATE_VERSION:-}"
 
 header_info "$APP"
 variables

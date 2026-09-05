@@ -110,7 +110,32 @@ export AUTOGRAPH_VERBOSITY=0
 export GLOG_minloglevel=3
 export GLOG_logtostderr=0
 
-fetch_and_deploy_gh_release "frigate" "blakeblackshear/frigate" "tarball" "v0.17.2" "/opt/frigate"
+FRIGATE_STABLE_TAG="v0.17.2"
+FRIGATE_RC_TAG=""
+frigate_releases_json="$(mktemp)"
+if github_api_call "https://api.github.com/repos/blakeblackshear/frigate/releases?per_page=15" "$frigate_releases_json"; then
+  _tag=$(jq -r '[.[] | select(.draft==false and .prerelease==false)][0].tag_name // empty' "$frigate_releases_json")
+  [[ -n "$_tag" ]] && FRIGATE_STABLE_TAG="$_tag"
+  FRIGATE_RC_TAG=$(jq -r '[.[] | select(.draft==false and .prerelease==true)][0].tag_name // empty' "$frigate_releases_json")
+fi
+rm -f "$frigate_releases_json"
+
+FRIGATE_TAG="${FRIGATE_VERSION:-}"
+if [[ -z "$FRIGATE_TAG" ]]; then
+  FRIGATE_TAG="$FRIGATE_STABLE_TAG"
+  if [[ -n "$FRIGATE_RC_TAG" && "$FRIGATE_RC_TAG" != "$FRIGATE_STABLE_TAG" ]]; then
+    echo ""
+    msg_custom "🧪" "${YW}" "Frigate RC available: ${FRIGATE_RC_TAG} (stable: ${FRIGATE_STABLE_TAG})"
+    frigate_reply=""
+    read -r -t 30 -p "${TAB3}Install the RC build instead of stable? [y/N] (auto-no in 30s): " frigate_reply </dev/tty || frigate_reply=""
+    case "${frigate_reply,,}" in
+    y | yes) FRIGATE_TAG="$FRIGATE_RC_TAG" ;;
+    esac
+  fi
+fi
+msg_ok "Selected Frigate version: ${FRIGATE_TAG}"
+
+fetch_and_deploy_gh_release "frigate" "blakeblackshear/frigate" "tarball" "$FRIGATE_TAG" "/opt/frigate"
 
 msg_info "Building Nginx"
 $STD bash /opt/frigate/docker/main/build_nginx.sh
@@ -268,6 +293,67 @@ GLOG_minloglevel=3
 GLOG_logtostderr=0
 EOF
 
+# ══════════════════════════════════════════════════════════════════════════════
+# AMD ROCm / MIGraphX
+#
+# setup_hwaccel's AMD APU branch (_setup_amd_apu) installs only the Mesa VA-API
+# stack - it never calls _setup_rocm, which is reached from the discrete-GPU
+# branch alone. So an APU (Phoenix, Rembrandt, ...) gets video decode but no
+# compute stack, and Frigate's "onnx" detector silently stays on CPU.
+#
+# This replicates what upstream's docker/rocm image does on top of the main
+# image: the ROCm userspace compute libs, the MIGraphX/MIOpen/rocBLAS libs the
+# execution provider dlopens, and the onnxruntime wheel built against MIGraphX
+# (the stock CPU onnxruntime from requirements.txt has no ROCm provider).
+# Runs after every pip step so nothing reinstalls the CPU wheel over it.
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ -e /dev/kfd ]] && lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | grep -q '\[1002:'; then
+  msg_info "Setting up AMD ROCm + MIGraphX"
+
+  _setup_rocm "$(get_os_info id)" "$(get_os_info codename)"
+
+  if [[ -d /opt/rocm ]]; then
+    # rocm-hip-runtime pulls neither MIGraphX nor MIOpen/rocBLAS/rocFFT, which
+    # are exactly what onnxruntime-migraphx calls into at inference time.
+    _cs_apt_install_optional migraphx miopen-hip rocblas rocfft libnuma1 libstdc++-12-dev
+
+    # Bookworm's Mesa 22.3 predates gfx1103 (Phoenix); VA-API on RDNA3 APUs
+    # needs the backports build, same as upstream's rocm Dockerfile does.
+    cat <<'BACKPORTS_EOF' >/etc/apt/sources.list.d/debian-backports.sources
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: bookworm-backports
+Components: main
+Enabled: yes
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+BACKPORTS_EOF
+    $STD apt update
+    $STD apt -y -t bookworm-backports install mesa-va-drivers mesa-vulkan-drivers 2>/dev/null ||
+      msg_warn "Backports Mesa unavailable - VA-API may not work on RDNA3"
+
+    $STD pip3 uninstall -y onnxruntime 2>/dev/null || true
+    if $STD pip3 install "https://github.com/NickM-27/frigate-onnxruntime-rocm/releases/download/v7.1.0/onnxruntime_migraphx-1.23.1-cp311-cp311-linux_x86_64.whl"; then
+      # Phoenix/Phoenix3 reports gfx1103, which ROCm has no official kernels
+      # for; 11.0.0 is the RDNA3 baseline upstream maps it to. Check with
+      # `unset HSA_OVERRIDE_GFX_VERSION && /opt/rocm/bin/rocminfo | grep gfx`
+      # and change this line in /etc/frigate.env if yours differs.
+      cat <<EOF >>/etc/frigate.env
+HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0}
+MIGRAPHX_DISABLE_MIOPEN_FUSION=1
+MIGRAPHX_DISABLE_SCHEDULE_PASS=1
+MIGRAPHX_DISABLE_REDUCE_FUSION=1
+MIGRAPHX_ENABLE_HIPRTC_WORKAROUNDS=1
+EOF
+      ROCM_READY=1
+      msg_ok "AMD ROCm + MIGraphX ready (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
+    else
+      msg_warn "onnxruntime-migraphx wheel failed to install - ONNX detector will stay on CPU"
+    fi
+  else
+    msg_warn "ROCm did not install (/opt/rocm missing) - skipping MIGraphX"
+  fi
+fi
+
 cat <<EOF >/config/config.yml
 mqtt:
   enabled: false
@@ -312,6 +398,35 @@ ffmpeg:
 model:
   path: /models/cpu_model.tflite
 EOF
+fi
+
+if [[ "${ROCM_READY:-0}" == "1" ]]; then
+  cat <<'ROCM_HINT_EOF' >>/config/config.yml
+
+# ── AMD ROCm / MIGraphX ──────────────────────────────────────────────────────
+# ROCm + MIGraphX are installed and /dev/kfd is passed through, so the "onnx"
+# detector picks up the GPU by itself. Frigate ships no default ONNX model, so
+# put one in /config/model_cache first (YOLOv9 is the best supported on AMD;
+# YOLO-NAS runs poorly on integrated GPUs), then replace the detectors/model
+# blocks above with:
+#
+# detectors:
+#   onnx:
+#     type: onnx
+# model:
+#   model_type: yolo-generic
+#   width: 320
+#   height: 320
+#   input_tensor: nchw
+#   input_dtype: float
+#   path: /config/model_cache/yolov9-t.onnx
+#   labelmap_path: /labelmap/coco-80.txt
+#
+# The first start converts the model to .mxr format and is slow, and the AMD
+# kernel is known to be fragile during that step: keep detect disabled until
+# the log says the conversion finished, then turn it back on.
+# Check the GPU is visible with: /opt/rocm/bin/rocminfo | grep gfx
+ROCM_HINT_EOF
 fi
 msg_ok "Configured Frigate"
 
