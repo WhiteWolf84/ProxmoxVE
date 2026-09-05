@@ -448,6 +448,12 @@ cat <<EOF >/etc/systemd/system/go2rtc.service
 [Unit]
 Description=go2rtc streaming service
 After=network.target create_directories.service
+# go2rtc's own config is regenerated from Frigate's config.yml by
+# create_config.py on every start, so it goes stale as soon as Frigate is
+# restarted with a changed config (new camera, changed stream). PartOf makes
+# systemd propagate Frigate's stop/restart jobs here; the After= in
+# frigate.service keeps go2rtc coming back up first during that restart.
+PartOf=frigate.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -469,6 +475,9 @@ cat <<EOF >/etc/systemd/system/frigate.service
 [Unit]
 Description=Frigate NVR service
 After=go2rtc.service create_directories.service
+# PartOf only propagates stop/restart, never start, so without this a
+# "systemctl start frigate" on its own would leave go2rtc down.
+Wants=go2rtc.service
 StartLimitIntervalSec=0
 
 [Service]
