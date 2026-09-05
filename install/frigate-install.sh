@@ -19,6 +19,58 @@ if [[ "$VERSION_ID" != "12" ]]; then
   exit 238
 fi
 
+# onnxruntime ships shared objects linked requesting an executable stack. A
+# kernel that refuses to grant one at dlopen time makes glibc raise "cannot
+# enable executable stack as shared object requires: Invalid argument", and
+# Frigate dies on "import onnxruntime" before it ever reads the config. None
+# of this code needs an executable stack. Debian dropped execstack and
+# Bookworm's patchelf predates --clear-execstack, so clear the PF_X bit on
+# PT_GNU_STACK directly. Takes the directories to walk as arguments; defaults
+# to the installed onnxruntime package.
+clear_execstack() {
+  python3 - "$@" <<'EXECSTACK_EOF'
+import os, struct, sys, sysconfig
+
+PT_GNU_STACK, PF_X = 0x6474E551, 0x1
+
+
+def clear(path):
+    with open(path, "r+b") as f:
+        if f.read(4) != b"\x7fELF" or f.read(1)[0] != 2:
+            return False
+        f.seek(0x20)
+        phoff = struct.unpack("<Q", f.read(8))[0]
+        f.seek(0x36)
+        entsize, num = struct.unpack("<HH", f.read(4))
+        for i in range(num):
+            entry = phoff + i * entsize
+            f.seek(entry)
+            if struct.unpack("<I", f.read(4))[0] != PT_GNU_STACK:
+                continue
+            f.seek(entry + 4)
+            flags = struct.unpack("<I", f.read(4))[0]
+            if flags & PF_X:
+                f.seek(entry + 4)
+                f.write(struct.pack("<I", flags & ~PF_X))
+                return True
+    return False
+
+
+bases = sys.argv[1:] or [
+    os.path.join(sysconfig.get_paths()["purelib"], "onnxruntime"),
+    os.path.join("/usr/local/lib/python3.11/dist-packages", "onnxruntime"),
+]
+for base in bases:
+    for root, _, files in os.walk(base):
+        for name in files:
+            if ".so" in name:
+                try:
+                    clear(os.path.join(root, name))
+                except (OSError, struct.error):
+                    pass
+EXECSTACK_EOF
+}
+
 msg_info "Converting APT sources to DEB822 format"
 if [ -f /etc/apt/sources.list ]; then
   cat >/etc/apt/sources.list.d/debian.sources <<'EOF'
@@ -276,6 +328,7 @@ echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
 $STD bash /opt/frigate/docker/main/install_deps.sh
 rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
 $STD pip3 install -U /wheels/*.whl
+clear_execstack
 ldconfig
 msg_ok "Installed Frigate Runtime Dependencies"
 
@@ -367,6 +420,7 @@ BACKPORTS_EOF
 
     $STD pip3 uninstall -y onnxruntime 2>/dev/null || true
     if $STD pip3 install "https://github.com/NickM-27/frigate-onnxruntime-rocm/releases/download/v7.1.0/onnxruntime_migraphx-1.23.1-cp311-cp311-linux_x86_64.whl"; then
+      clear_execstack /opt/rocm/lib
       # Phoenix/Phoenix3 reports gfx1103, which ROCm has no official kernels
       # for; 11.0.0 is the RDNA3 baseline upstream maps it to. Check with
       # `unset HSA_OVERRIDE_GFX_VERSION && /opt/rocm/bin/rocminfo | grep gfx`
