@@ -425,6 +425,25 @@ BACKPORTS_EOF
     $STD pip3 uninstall -y onnxruntime 2>/dev/null || true
     if $STD pip3 install "https://github.com/NickM-27/frigate-onnxruntime-rocm/releases/download/v7.1.0/onnxruntime_migraphx-1.23.1-cp311-cp311-linux_x86_64.whl"; then
       clear_execstack /opt/rocm/lib
+
+      # MIGraphX compiles the model's kernels at runtime with ROCm's clang,
+      # with warnings as errors. If a GCC install directory without libstdc++
+      # headers is also present - a newer gcc pulled in as somebody's
+      # dependency - clang refuses to run at all:
+      #   error: future releases of the clang compiler will prefer GCC
+      #   installations containing libstdc++ include directories
+      #   [-Werror,-Wgcc-install-dir-libstdcxx]
+      # and no model ever compiles. Point it at the newest GCC that does ship
+      # the C++ headers. MIGRAPHX_GPU_HIP_FLAGS is appended last to the
+      # compile options, so it overrides what MIGraphX set before it.
+      MIGRAPHX_HIP_FLAGS="-Wno-gcc-install-dir-libstdcxx"
+      for _gccver in $(ls /usr/lib/gcc/x86_64-linux-gnu/ 2>/dev/null | sort -Vr); do
+        if [[ -d "/usr/include/c++/${_gccver}" ]]; then
+          MIGRAPHX_HIP_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/${_gccver} ${MIGRAPHX_HIP_FLAGS}"
+          break
+        fi
+      done
+
       # Phoenix/Phoenix3 reports gfx1103, which ROCm has no official kernels
       # for; 11.0.0 is the RDNA3 baseline upstream maps it to. Check with
       # `unset HSA_OVERRIDE_GFX_VERSION && /opt/rocm/bin/rocminfo | grep gfx`
@@ -435,6 +454,7 @@ MIGRAPHX_DISABLE_MIOPEN_FUSION=1
 MIGRAPHX_DISABLE_SCHEDULE_PASS=1
 MIGRAPHX_DISABLE_REDUCE_FUSION=1
 MIGRAPHX_ENABLE_HIPRTC_WORKAROUNDS=1
+MIGRAPHX_GPU_HIP_FLAGS="${MIGRAPHX_HIP_FLAGS}"
 EOF
       ROCM_READY=1
       msg_ok "AMD ROCm + MIGraphX ready (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
