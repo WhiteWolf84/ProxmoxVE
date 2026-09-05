@@ -47,6 +47,8 @@ msg_ok "Converted APT sources"
 
 msg_info "Installing Dependencies"
 $STD apt install -y \
+  gnupg \
+  pciutils \
   xz-utils \
   python3 \
   python3-dev \
@@ -247,8 +249,25 @@ else
   msg_warn "OpenVino build failed (CPU may not support required instructions). Frigate will use CPU model."
 fi
 
-msg_info "Installing HailoRT Runtime"
-$STD bash /opt/frigate/docker/main/install_hailort.sh
+# HailoRT and MemryX are runtimes for M.2/PCIe accelerators: without the card
+# they are downloaded, unpacked and never used (MemryX also pip-installs its
+# own dependency set). Both vendors are detectable on the bus, so install them
+# only when the card is actually there. Set FRIGATE_FORCE_NPU=1 to install them
+# regardless - useful if the accelerator is going in after the container.
+if [[ "${FRIGATE_FORCE_NPU:-0}" == "1" ]] || lspci -nn 2>/dev/null | grep -q '\[1e60:'; then
+  msg_info "Installing HailoRT Runtime"
+  $STD bash /opt/frigate/docker/main/install_hailort.sh
+  msg_ok "Installed HailoRT Runtime"
+else
+  msg_ok "No Hailo device on the bus - skipping HailoRT"
+fi
+
+# Everything below used to sit under the "HailoRT" heading, which reads as if
+# it were Hailo-specific. It is not: the rootfs overlay carries the s6 run
+# scripts, nginx config and go2rtc config generator, install_deps.sh brings in
+# ffmpeg and libedgetpu, and the wheels are the Python build from earlier.
+# Frigate does not start without any of it.
+msg_info "Installing Frigate Runtime Dependencies"
 cp -a /opt/frigate/docker/main/rootfs/. /
 sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
 echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
@@ -258,11 +277,15 @@ $STD bash /opt/frigate/docker/main/install_deps.sh
 rm -f /etc/dpkg/dpkg.cfg.d/force-overwrite
 $STD pip3 install -U /wheels/*.whl
 ldconfig
-msg_ok "Installed HailoRT Runtime"
+msg_ok "Installed Frigate Runtime Dependencies"
 
-msg_info "Installing MemryX Runtime"
-$STD bash /opt/frigate/docker/main/install_memryx.sh
-msg_ok "Installed MemryX Runtime"
+if [[ "${FRIGATE_FORCE_NPU:-0}" == "1" ]] || lspci -nn 2>/dev/null | grep -q '\[1fe9:'; then
+  msg_info "Installing MemryX Runtime"
+  $STD bash /opt/frigate/docker/main/install_memryx.sh
+  msg_ok "Installed MemryX Runtime"
+else
+  msg_ok "No MemryX device on the bus - skipping MemryX runtime"
+fi
 
 msg_info "Building Frigate Application (Patience)"
 cd /opt/frigate
