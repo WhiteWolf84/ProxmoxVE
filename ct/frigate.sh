@@ -60,10 +60,13 @@ function refresh_os_template() {
     command -v pveam >/dev/null || return 0
     pveam update >/dev/null 2>&1 || return 0
 
+    # The engine runs with pipefail, so an unmatched grep here fails the whole
+    # pipeline and the ERR trap would abort container creation over a template
+    # refresh. Nothing about this is worth failing the build for.
     local newest
     newest=$(pveam available -section system 2>/dev/null | awk '{print $2}' |
         grep -E '^debian-12-standard_.*_amd64\.tar\.(zst|xz|gz)$' |
-        sort -t_ -k2 -V | tail -n1)
+        sort -t_ -k2 -V | tail -n1) || newest=""
     [[ -n "$newest" ]] || return 0
 
     local store

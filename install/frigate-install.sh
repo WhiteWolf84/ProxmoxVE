@@ -168,9 +168,11 @@ FRIGATE_STABLE_TAG="v0.17.2"
 FRIGATE_RC_TAG=""
 frigate_releases_json="$(mktemp)"
 if github_api_call "https://api.github.com/repos/blakeblackshear/frigate/releases?per_page=15" "$frigate_releases_json"; then
-  _tag=$(jq -r '[.[] | select(.draft==false and .prerelease==false)][0].tag_name // empty' "$frigate_releases_json")
+  # Guarded because a malformed body still arrives as HTTP 200 sometimes, and
+  # jq exiting non-zero on an assignment would abort the install outright.
+  _tag=$(jq -r '[.[] | select(.draft==false and .prerelease==false)][0].tag_name // empty' "$frigate_releases_json") || _tag=""
   [[ -n "$_tag" ]] && FRIGATE_STABLE_TAG="$_tag"
-  FRIGATE_RC_TAG=$(jq -r '[.[] | select(.draft==false and .prerelease==true)][0].tag_name // empty' "$frigate_releases_json")
+  FRIGATE_RC_TAG=$(jq -r '[.[] | select(.draft==false and .prerelease==true)][0].tag_name // empty' "$frigate_releases_json") || FRIGATE_RC_TAG=""
 fi
 rm -f "$frigate_releases_json"
 
@@ -281,7 +283,9 @@ if python3 /opt/frigate/docker/main/build_ov_model.py &>/dev/null; then
   if [[ -n "$OV_LABELS" && -f "$OV_LABELS" ]]; then
     ln -sf "$OV_LABELS" /openvino-model/coco_91cl_bkgr.txt
   else
-    OV_LABELS=$(find /usr/local/lib -name "coco_91cl_bkgr.txt" 2>/dev/null | head -1)
+    # Same pipefail hazard as above, and now actually reachable: find returns
+    # non-zero on a missing directory and takes the pipeline down with it.
+    OV_LABELS=$(find /usr/local/lib -name "coco_91cl_bkgr.txt" 2>/dev/null | head -1) || OV_LABELS=""
     if [[ -n "$OV_LABELS" ]]; then
       ln -sf "$OV_LABELS" /openvino-model/coco_91cl_bkgr.txt
     else
