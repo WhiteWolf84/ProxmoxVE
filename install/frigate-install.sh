@@ -219,7 +219,11 @@ if python3 /opt/frigate/docker/main/build_ov_model.py &>/dev/null; then
   mkdir -p /openvino-model
   cp /models/ssdlite_mobilenet_v2.xml /openvino-model/
   cp /models/ssdlite_mobilenet_v2.bin /openvino-model/
-  OV_LABELS=$(python3 -c "import omz_tools; import os; print(os.path.join(omz_tools.__path__[0], 'data/dataset_classes/coco_91cl_bkgr.txt'))" 2>/dev/null)
+  # omz_tools ships with openvino-dev, which requirements-ov.txt dropped in
+  # 0.18 (it now pulls plain openvino). The import then exits 1, and under the
+  # framework's ERR trap that assignment took the whole install down before
+  # either of the fallbacks below could run - so keep it non-fatal.
+  OV_LABELS=$(python3 -c "import omz_tools; import os; print(os.path.join(omz_tools.__path__[0], 'data/dataset_classes/coco_91cl_bkgr.txt'))" 2>/dev/null) || OV_LABELS=""
   if [[ -n "$OV_LABELS" && -f "$OV_LABELS" ]]; then
     ln -sf "$OV_LABELS" /openvino-model/coco_91cl_bkgr.txt
   else
@@ -227,11 +231,18 @@ if python3 /opt/frigate/docker/main/build_ov_model.py &>/dev/null; then
     if [[ -n "$OV_LABELS" ]]; then
       ln -sf "$OV_LABELS" /openvino-model/coco_91cl_bkgr.txt
     else
-      curl_with_retry "https://raw.githubusercontent.com/openvinotoolkit/open_model_zoo/master/data/dataset_classes/coco_91cl_bkgr.txt" "/openvino-model/coco_91cl_bkgr.txt"
+      curl_with_retry "https://raw.githubusercontent.com/openvinotoolkit/open_model_zoo/master/data/dataset_classes/coco_91cl_bkgr.txt" "/openvino-model/coco_91cl_bkgr.txt" ||
+        msg_warn "Could not fetch the OpenVino labelmap"
     fi
   fi
-  sed -i 's/truck/car/g' /openvino-model/coco_91cl_bkgr.txt
-  msg_ok "Built OpenVino Model"
+  # No labelmap is not fatal either: the config below already falls back to the
+  # CPU model when either OpenVino file is missing.
+  if [[ -f /openvino-model/coco_91cl_bkgr.txt ]]; then
+    sed -i 's/truck/car/g' /openvino-model/coco_91cl_bkgr.txt
+    msg_ok "Built OpenVino Model"
+  else
+    msg_warn "OpenVino labelmap unavailable - Frigate will use the CPU model"
+  fi
 else
   msg_warn "OpenVino build failed (CPU may not support required instructions). Frigate will use CPU model."
 fi
