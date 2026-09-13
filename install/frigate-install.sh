@@ -164,22 +164,43 @@ export AUTOGRAPH_VERBOSITY=0
 export GLOG_minloglevel=3
 export GLOG_logtostderr=0
 
-FRIGATE_STABLE_TAG="v0.17.2"
+# Fallback when the releases API is unreachable. 0.18.0 is the version the
+# ROCm, execstack and OpenVino-labelmap handling below was written against.
+FRIGATE_STABLE_TAG="v0.18.0"
 FRIGATE_RC_TAG=""
 frigate_releases_json="$(mktemp)"
-if github_api_call "https://api.github.com/repos/blakeblackshear/frigate/releases?per_page=15" "$frigate_releases_json"; then
-  # Guarded because a malformed body still arrives as HTTP 200 sometimes, and
-  # jq exiting non-zero on an assignment would abort the install outright.
-  _tag=$(jq -r '[.[] | select(.draft==false and .prerelease==false)][0].tag_name // empty' "$frigate_releases_json") || _tag=""
-  [[ -n "$_tag" ]] && FRIGATE_STABLE_TAG="$_tag"
-  FRIGATE_RC_TAG=$(jq -r '[.[] | select(.draft==false and .prerelease==true)][0].tag_name // empty' "$frigate_releases_json") || FRIGATE_RC_TAG=""
+if github_api_call "https://api.github.com/repos/blakeblackshear/frigate/releases?per_page=30" "$frigate_releases_json"; then
+  # GitHub lists releases newest-published first, which is not highest
+  # version: a patch backported to an older line is published after the newer
+  # minor, and a beta can land after an RC of the same version. Rank by
+  # version instead - numeric parts, then stage (alpha < beta < rc < final),
+  # then stage number - and only offer a pre-release that is ahead of stable,
+  # so a leftover RC from an already-released version is never proposed.
+  # Prints the stable tag, then the RC tag (empty when there is none worth
+  # offering). Read through mapfile so a malformed body cannot trip set -e.
+  mapfile -t _frigate_tags < <(jq -r '
+    def vkey:
+      (.tag_name // "" | sub("^[vV]"; "")) as $t
+      | ($t | capture("^(?<base>[0-9]+(?:\\.[0-9]+)*)(?:-(?<stage>[A-Za-z]+)\\.?(?<n>[0-9]*))?") // {"base": "0"}) as $m
+      | [ ($m.base | split(".") | map(tonumber)),
+          (if ($m.stage // "") == "" then 3
+           else ({"alpha": 0, "beta": 1, "rc": 2}[$m.stage | ascii_downcase] // 0) end),
+          (if ($m.n // "") == "" then 0 else ($m.n | tonumber) end) ];
+    [.[] | select(.draft == false)] as $all
+    | ([$all[] | select(.prerelease == false)] | sort_by(vkey) | last) as $stable
+    | ([$all[] | select(.prerelease == true)] | sort_by(vkey) | last) as $rc
+    | ($stable.tag_name // ""),
+      (if $rc != null and ($stable == null or ($rc | vkey) > ($stable | vkey)) then $rc.tag_name else "" end)
+  ' "$frigate_releases_json" 2>/dev/null || true)
+  [[ -n "${_frigate_tags[0]:-}" ]] && FRIGATE_STABLE_TAG="${_frigate_tags[0]}"
+  FRIGATE_RC_TAG="${_frigate_tags[1]:-}"
 fi
 rm -f "$frigate_releases_json"
 
 FRIGATE_TAG="${FRIGATE_VERSION:-}"
 if [[ -z "$FRIGATE_TAG" ]]; then
   FRIGATE_TAG="$FRIGATE_STABLE_TAG"
-  if [[ -n "$FRIGATE_RC_TAG" && "$FRIGATE_RC_TAG" != "$FRIGATE_STABLE_TAG" ]]; then
+  if [[ -n "$FRIGATE_RC_TAG" ]]; then
     echo ""
     msg_custom "🧪" "${YW}" "Frigate RC available: ${FRIGATE_RC_TAG} (stable: ${FRIGATE_STABLE_TAG})"
     frigate_reply=""
@@ -560,12 +581,6 @@ cat <<EOF >/etc/systemd/system/go2rtc.service
 [Unit]
 Description=go2rtc streaming service
 After=network.target create_directories.service
-# go2rtc's own config is regenerated from Frigate's config.yml by
-# create_config.py on every start, so it goes stale as soon as Frigate is
-# restarted with a changed config (new camera, changed stream). PartOf makes
-# systemd propagate Frigate's stop/restart jobs here; the After= in
-# frigate.service keeps go2rtc coming back up first during that restart.
-PartOf=frigate.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -587,9 +602,6 @@ cat <<EOF >/etc/systemd/system/frigate.service
 [Unit]
 Description=Frigate NVR service
 After=go2rtc.service create_directories.service
-# PartOf only propagates stop/restart, never start, so without this a
-# "systemctl start frigate" on its own would leave go2rtc down.
-Wants=go2rtc.service
 StartLimitIntervalSec=0
 
 [Service]
