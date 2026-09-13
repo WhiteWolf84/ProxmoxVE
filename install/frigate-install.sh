@@ -347,6 +347,13 @@ fi
 msg_info "Installing Frigate Runtime Dependencies"
 cp -a /opt/frigate/docker/main/rootfs/. /
 sed -i '/^.*unset DEBIAN_FRONTEND.*$/d' /opt/frigate/docker/main/install_deps.sh
+# install_deps.sh pipes `wget -qO -` of Intel's repo key straight into gpg,
+# with no retry. One bad response from their CDN hands gpg nothing, it fails
+# with "no valid OpenPGP data found", and the whole install goes down with it
+# - even on a host with no Intel GPU at all. Fetch the key with retries first
+# and have the script read the file instead.
+curl_with_retry "https://repositories.intel.com/gpu/intel-graphics.key" "/tmp/intel-graphics.key"
+sed -i 's|wget -qO - https://repositories.intel.com/gpu/intel-graphics.key|cat /tmp/intel-graphics.key|' /opt/frigate/docker/main/install_deps.sh
 echo "libedgetpu1-max libedgetpu/accepted-eula boolean true" | debconf-set-selections
 echo "libedgetpu1-max libedgetpu/install-confirm-max boolean true" | debconf-set-selections
 echo 'force-overwrite' >/etc/dpkg/dpkg.cfg.d/force-overwrite
