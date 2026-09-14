@@ -429,6 +429,15 @@ EOF
 if [[ -e /dev/kfd ]] && lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | grep -q '\[1002:'; then
   msg_info "Setting up AMD ROCm + MIGraphX"
 
+  # Frigate's install_deps.sh ends with `apt-get purge gnupg`, autoremove and
+  # rm -rf /var/lib/apt/lists/* - it slims a Docker image. That runs before
+  # this block, so gnupg installed with the dependencies at the top is gone
+  # again by now, and setup_deb822_repo cannot dearmor ROCm's signing key
+  # ("/usr/bin/gpg: No such file or directory"). Put it back, refreshing the
+  # package lists first since those were wiped too.
+  $STD apt update
+  $STD apt install -y gnupg
+
   _setup_rocm "$(get_os_info id)" "$(get_os_info codename)"
 
   if [[ -d /opt/rocm ]]; then
