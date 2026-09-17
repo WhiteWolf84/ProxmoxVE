@@ -622,6 +622,21 @@ if [[ "${ROCM_READY:-0}" == "1" ]]; then
 # kernel is known to be fragile during that step: keep detect disabled until
 # the log says the conversion finished, then turn it back on.
 # Check the GPU is visible with: /opt/rocm/bin/rocminfo | grep gfx
+#
+# Once a model is in place, this is the only check that proves the GPU is
+# actually being used. It builds a real session and asks the session - not the
+# wheel - which providers it ended up with:
+#
+#   python3 -c "import onnxruntime as ort; \
+#     s = ort.InferenceSession('/config/model_cache/yolov9-t.onnx', \
+#                              providers=['MIGraphXExecutionProvider']); \
+#     print(s.get_providers())"
+#
+# MIGraphXExecutionProvider in that output means inference runs on the GPU.
+# CPUExecutionProvider alone means the provider failed to load and onnxruntime
+# fell back without raising - which is what silent CPU detection looks like.
+# Do not use onnxruntime.get_available_providers() to check this: it lists the
+# providers compiled into the wheel and answers the same either way.
 ROCM_HINT_EOF
 fi
 msg_ok "Configured Frigate"
