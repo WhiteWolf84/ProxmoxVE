@@ -443,7 +443,21 @@ if [[ -e /dev/kfd ]] && lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | grep
   if [[ -d /opt/rocm ]]; then
     # rocm-hip-runtime pulls neither MIGraphX nor MIOpen/rocBLAS/rocFFT, which
     # are exactly what onnxruntime-migraphx calls into at inference time.
-    _cs_apt_install_optional migraphx miopen-hip rocblas rocfft libnuma1 libstdc++-12-dev
+    #
+    # migraphx is the one that cannot be optional. libmigraphx_c.so is what the
+    # execution provider dlopens, and when it is absent onnxruntime writes a
+    # line to stderr and runs on the CPU: no exception, no failed detector,
+    # nothing in the Frigate UI. An install interrupted by a full disk leaves
+    # exactly that state behind - migraphx-dev half-configured ("iU") with the
+    # runtime package missing, and /opt/rocm/lib/libmigraphx_c.so pointing at a
+    # libmigraphx_c.so.3 that was never unpacked. _cs_apt_install_optional
+    # swallows precisely this failure, so install it on its own and say so.
+    MIGRAPHX_OK=1
+    $STD apt install -y migraphx || MIGRAPHX_OK=0
+    [[ $MIGRAPHX_OK -eq 1 ]] ||
+      msg_warn "migraphx did not install - the ONNX detector will run on CPU. Check 'dpkg -l migraphx*' for a half-configured package and free disk space before retrying"
+
+    _cs_apt_install_optional miopen-hip rocblas rocfft libnuma1 libstdc++-12-dev
 
     # Bookworm's Mesa 22.3 predates gfx1103 (Phoenix); VA-API on RDNA3 APUs
     # needs the backports build, same as upstream's rocm Dockerfile does.
@@ -493,8 +507,12 @@ MIGRAPHX_DISABLE_REDUCE_FUSION=1
 MIGRAPHX_ENABLE_HIPRTC_WORKAROUNDS=1
 MIGRAPHX_GPU_HIP_FLAGS="${MIGRAPHX_HIP_FLAGS}"
 EOF
-      ROCM_READY=1
-      msg_ok "AMD ROCm + MIGraphX ready (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
+      if [[ $MIGRAPHX_OK -eq 1 ]]; then
+        ROCM_READY=1
+        msg_ok "AMD ROCm + MIGraphX ready (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
+      else
+        ROCM_READY=0
+      fi
     else
       msg_warn "onnxruntime-migraphx wheel failed to install - ONNX detector will stay on CPU"
     fi
