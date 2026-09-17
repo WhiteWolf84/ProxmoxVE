@@ -517,11 +517,30 @@ MIGRAPHX_DISABLE_REDUCE_FUSION=1
 MIGRAPHX_ENABLE_HIPRTC_WORKAROUNDS=1
 MIGRAPHX_GPU_HIP_FLAGS="${MIGRAPHX_HIP_FLAGS}"
 EOF
-      if [[ $MIGRAPHX_OK -eq 1 ]]; then
-        ROCM_READY=1
-        msg_ok "AMD ROCm + MIGraphX ready (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
+      # "The wheel installed" proves nothing about the GPU. The provider is
+      # dlopened when a session is created, and if one of its libraries cannot
+      # be resolved onnxruntime writes a line to stderr and runs on the CPU -
+      # no exception, no failed detector, nothing visible in Frigate.
+      # get_available_providers() does not catch it either: it lists what the
+      # wheel was compiled with, not what can load. So resolve the provider's
+      # own dynamic dependencies, which needs no model - Frigate ships none and
+      # /config has none yet at this point.
+      ROCM_READY=0
+      ORT_CAPI="$(python3 -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "onnxruntime", "capi"))' 2>/dev/null)" || ORT_CAPI=""
+      [[ -d "$ORT_CAPI" ]] || ORT_CAPI="/usr/local/lib/python3.11/dist-packages/onnxruntime/capi"
+      MIGRAPHX_EP="${ORT_CAPI}/libonnxruntime_providers_migraphx.so"
+
+      if [[ ! -f "$MIGRAPHX_EP" ]]; then
+        msg_warn "onnxruntime has no MIGraphX provider at ${MIGRAPHX_EP} - the ONNX detector will run on CPU"
       else
-        ROCM_READY=0
+        EP_MISSING="$(ldd "$MIGRAPHX_EP" 2>/dev/null | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')" || EP_MISSING=""
+        EP_MISSING="${EP_MISSING% }"
+        if [[ -n "$EP_MISSING" ]]; then
+          msg_warn "MIGraphX provider cannot load, unresolved: ${EP_MISSING} - the ONNX detector will run on CPU"
+        elif [[ $MIGRAPHX_OK -eq 1 ]]; then
+          ROCM_READY=1
+          msg_ok "AMD ROCm + MIGraphX ready, provider dependencies all resolved (HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0})"
+        fi
       fi
     else
       msg_warn "onnxruntime-migraphx wheel failed to install - ONNX detector will stay on CPU"
