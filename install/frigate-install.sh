@@ -459,6 +459,16 @@ if [[ -e /dev/kfd ]] && lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | grep
 
     _cs_apt_install_optional miopen-hip rocblas rocfft libnuma1 libstdc++-12-dev
 
+    # Upstream's rocm image writes this file and runs ldconfig rather than
+    # relying on rpath (docker/rocm/Dockerfile), because nothing else tells the
+    # dynamic linker where ROCm's libraries live. _setup_rocm writes it too,
+    # but before the packages above were unpacked, so the cache it built does
+    # not know about libmigraphx, MIOpen or rocBLAS yet. Rebuild it now that
+    # they are on disk, or the provider's dlopen fails with every package
+    # correctly installed.
+    echo /opt/rocm/lib >/etc/ld.so.conf.d/rocm.conf
+    ldconfig
+
     # Bookworm's Mesa 22.3 predates gfx1103 (Phoenix); VA-API on RDNA3 APUs
     # needs the backports build, same as upstream's rocm Dockerfile does.
     cat <<'BACKPORTS_EOF' >/etc/apt/sources.list.d/debian-backports.sources
