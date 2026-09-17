@@ -11,6 +11,17 @@ APP="Frigate"
 var_tags="${var_tags:-nvr}"
 var_cpu="${var_cpu:-8}"
 var_ram="${var_ram:-4096}"
+# The ROCm userspace this script installs on an AMD host is ~13 GB once
+# unpacked (hipblaslt 4.6, miopen-hip 2.8, rocfft 1.7, migraphx 1.6, rocrand
+# 1.4, rocblas 0.7 ...), on top of a from-source Frigate build that already
+# fills most of 20 GB with the source tree, node_modules, the Python wheels and
+# a 2 GB ccache. Give an AMD host room for it; everything else keeps the
+# upstream default, and an explicit var_disk always wins.
+if [[ -z "${var_disk:-}" ]] && [[ -e /dev/kfd ]] &&
+    command -v lspci >/dev/null 2>&1 &&
+    lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | grep -q '\[1002:'; then
+    var_disk=40
+fi
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
